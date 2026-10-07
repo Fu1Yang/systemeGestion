@@ -21,11 +21,11 @@
                FILE STATUS IS WS-FILE-STATUS.
            
            SELECT MOUVEMENTS-FILE ASSIGN TO "mouvements.dat"
-               ORGANIZATION IS SEQUENTIAL
+               ORGANIZATION IS LINE SEQUENTIAL
                FILE STATUS IS WS-MVT-STATUS.
            
            SELECT RAPPORT-FILE ASSIGN TO "rapport.txt"
-               ORGANIZATION IS SEQUENTIAL
+               ORGANIZATION IS LINE SEQUENTIAL
                FILE STATUS IS WS-RPT-STATUS.
        
        DATA DIVISION.
@@ -50,7 +50,7 @@
                88 MVT-DEPOT        VALUE 'D'.
                88 MVT-RETRAIT      VALUE 'R'.
                88 MVT-INTERET      VALUE 'I'.
-           05 MVT-MONTANT          PIC S9(9)V99.
+           05 MVT-MONTANT          PIC S9(11)V99.
            05 MVT-DATE             PIC X(10).
            05 MVT-LIBELLE          PIC X(50).
        
@@ -64,6 +64,10 @@
        
        01  WS-MVT-STATUS           PIC XX.
        01  WS-RPT-STATUS           PIC XX.
+       01  WS-RPT-ERROR            PIC X VALUE 'N'.
+       01  WS-CPT-READY            PIC X VALUE 'N'.
+       01  WS-MVT-READY            PIC X VALUE 'N'.
+       01  WS-TYPE-MOUVEMENT       PIC X.
        
        01  WS-CHOIX-MENU           PIC 9 VALUE 9.
            88 CREATION-COMPTE      VALUE 1.
@@ -73,12 +77,15 @@
            88 CALCUL-INTERETS      VALUE 5.
            88 RAPPORT              VALUE 6.
            88 QUITTER              VALUE 0.
+       01  WS-CONFIRMATION         PIC X.
        
        01  WS-NUMERO-COMPTE        PIC 9(10).
-       01  WS-MONTANT              PIC 9(9)V99.
+       01  WS-MONTANT              PIC 9(11)V99.
        01  WS-NOM                  PIC X(30).
        01  WS-PRENOM               PIC X(30).
        01  WS-TAUX                 PIC 9V99.
+       01  WS-SAISIE               PIC X(40).
+       01  WS-SAISIE-OK            PIC X VALUE 'N'.
        
        01  WS-DATE-JOUR.
            05 WS-ANNEE             PIC 9999.
@@ -86,9 +93,10 @@
            05 WS-JOUR              PIC 99.
        
        01  WS-DATE-FORMAT          PIC X(10).
+       01  WS-SOLDE-RAPPORT        PIC Z(10)9.99.
        
        01  WS-CALCUL.
-           05 WS-INTERETS          PIC S9(9)V99.
+           05 WS-INTERETS          PIC S9(11)V99.
            05 WS-NOUVEAU-SOLDE     PIC S9(11)V99.
        
        01  WS-COMPTEURS.
@@ -106,7 +114,7 @@
        PROCEDURE DIVISION.
        MAIN-PROCEDURE.
            PERFORM INITIALISATION
-           IF WS-FILE-OK
+           IF WS-CPT-READY = 'Y' AND WS-MVT-READY = 'Y'
                PERFORM MENU-PRINCIPAL UNTIL QUITTER
            END-IF
            PERFORM TERMINAISON
@@ -126,7 +134,18 @@
                DISPLAY 'ERREUR ouverture: ' WS-FILE-STATUS
                DISPLAY 'Impossible de continuer.'
            ELSE
-               DISPLAY 'Systeme pret!'
+               MOVE 'Y' TO WS-CPT-READY
+               OPEN EXTEND MOUVEMENTS-FILE
+               IF WS-MVT-STATUS = '35'
+                   OPEN OUTPUT MOUVEMENTS-FILE
+               END-IF
+               IF WS-MVT-STATUS = '00'
+                   MOVE 'Y' TO WS-MVT-READY
+                   DISPLAY 'Systeme pret!'
+               ELSE
+                   DISPLAY 'ERREUR ouverture mouvements: '
+                           WS-MVT-STATUS
+               END-IF
            END-IF
            
            ACCEPT WS-DATE-JOUR FROM DATE YYYYMMDD
@@ -144,6 +163,8 @@
            DISPLAY WS-MSG-MENU2
            DISPLAY 'Votre choix: ' WITH NO ADVANCING
            ACCEPT WS-CHOIX-MENU
+               ON EXCEPTION MOVE 0 TO WS-CHOIX-MENU
+           END-ACCEPT
            
            EVALUATE TRUE
                WHEN CREATION-COMPTE
@@ -169,7 +190,10 @@
            DISPLAY '===== CREATION DE COMPTE ====='
            DISPLAY 'Numero de compte (10 chiffres): '
                    WITH NO ADVANCING
-           ACCEPT WS-NUMERO-COMPTE
+           PERFORM SAISIR-NUMERO
+           IF WS-SAISIE-OK NOT = 'Y'
+               EXIT PARAGRAPH
+           END-IF
            
            MOVE WS-NUMERO-COMPTE TO CPT-NUMERO
            READ COMPTES-FILE
@@ -178,9 +202,16 @@
                    ACCEPT WS-NOM
                    DISPLAY 'Prenom: ' WITH NO ADVANCING
                    ACCEPT WS-PRENOM
+                   IF WS-NOM = SPACES OR WS-PRENOM = SPACES
+                       DISPLAY 'ERREUR: Nom et prenom requis!'
+                       EXIT PARAGRAPH
+                   END-IF
                    DISPLAY 'Taux interet (ex: 2.50): '
                            WITH NO ADVANCING
-                   ACCEPT WS-TAUX
+                   PERFORM SAISIR-TAUX
+                   IF WS-SAISIE-OK NOT = 'Y'
+                       EXIT PARAGRAPH
+                   END-IF
                    
                    MOVE WS-NOM TO CPT-NOM
                    MOVE WS-PRENOM TO CPT-PRENOM
@@ -191,8 +222,13 @@
                    MOVE WS-DATE-FORMAT TO CPT-DATE-MAJ
                    
                    WRITE COMPTE-RECORD
-                   DISPLAY 'Compte cree avec succes!'
-                   ADD 1 TO WS-NB-COMPTES
+                   IF WS-FILE-STATUS = '00'
+                       DISPLAY 'Compte cree avec succes!'
+                       ADD 1 TO WS-NB-COMPTES
+                   ELSE
+                       DISPLAY 'ERREUR creation compte: '
+                               WS-FILE-STATUS
+                   END-IF
                NOT INVALID KEY
                    DISPLAY 'ERREUR: Ce numero existe deja!'
            END-READ.
@@ -201,7 +237,10 @@
            DISPLAY ' '
            DISPLAY '===== DEPOT ====='
            DISPLAY 'Numero de compte: ' WITH NO ADVANCING
-           ACCEPT WS-NUMERO-COMPTE
+           PERFORM SAISIR-NUMERO
+           IF WS-SAISIE-OK NOT = 'Y'
+               EXIT PARAGRAPH
+           END-IF
            
            MOVE WS-NUMERO-COMPTE TO CPT-NUMERO
            READ COMPTES-FILE
@@ -210,15 +249,30 @@
                NOT INVALID KEY
                    IF COMPTE-ACTIF
                        DISPLAY 'Montant du depot: ' WITH NO ADVANCING
-                       ACCEPT WS-MONTANT
+                       PERFORM SAISIR-MONTANT
+                       IF WS-SAISIE-OK NOT = 'Y'
+                           EXIT PARAGRAPH
+                       END-IF
                        IF WS-MONTANT > 0
-                           ADD WS-MONTANT TO CPT-SOLDE
+                           COMPUTE WS-NOUVEAU-SOLDE =
+                               CPT-SOLDE + WS-MONTANT
+                               ON SIZE ERROR
+                                   DISPLAY 'ERREUR: Solde maximum!'
+                                   EXIT PARAGRAPH
+                           END-COMPUTE
+                           MOVE WS-NOUVEAU-SOLDE TO CPT-SOLDE
                            MOVE WS-DATE-FORMAT TO CPT-DATE-MAJ
                            REWRITE COMPTE-RECORD
-                           DISPLAY 'Depot effectue. Nouveau solde: '
-                                   CPT-SOLDE ' EUR'
-                           ADD 1 TO WS-NB-OPERATIONS
-                           PERFORM ENREGISTRER-MOUVEMENT
+                           IF WS-FILE-STATUS = '00'
+                               DISPLAY 'Depot effectue. Nouveau solde: '
+                                       CPT-SOLDE ' EUR'
+                               ADD 1 TO WS-NB-OPERATIONS
+                               MOVE 'D' TO WS-TYPE-MOUVEMENT
+                               PERFORM ENREGISTRER-MOUVEMENT
+                           ELSE
+                               DISPLAY 'ERREUR ecriture compte: '
+                                       WS-FILE-STATUS
+                           END-IF
                        ELSE
                            DISPLAY 'ERREUR: Montant invalide!'
                        END-IF
@@ -231,7 +285,10 @@
            DISPLAY ' '
            DISPLAY '===== RETRAIT ====='
            DISPLAY 'Numero de compte: ' WITH NO ADVANCING
-           ACCEPT WS-NUMERO-COMPTE
+           PERFORM SAISIR-NUMERO
+           IF WS-SAISIE-OK NOT = 'Y'
+               EXIT PARAGRAPH
+           END-IF
            
            MOVE WS-NUMERO-COMPTE TO CPT-NUMERO
            READ COMPTES-FILE
@@ -241,15 +298,24 @@
                    IF COMPTE-ACTIF
                        DISPLAY 'Solde actuel: ' CPT-SOLDE ' EUR'
                        DISPLAY 'Montant du retrait: ' WITH NO ADVANCING
-                       ACCEPT WS-MONTANT
+                       PERFORM SAISIR-MONTANT
+                       IF WS-SAISIE-OK NOT = 'Y'
+                           EXIT PARAGRAPH
+                       END-IF
                        IF WS-MONTANT > 0 AND WS-MONTANT <= CPT-SOLDE
                            SUBTRACT WS-MONTANT FROM CPT-SOLDE
                            MOVE WS-DATE-FORMAT TO CPT-DATE-MAJ
                            REWRITE COMPTE-RECORD
-                           DISPLAY 'Retrait effectue. Nouveau solde: '
-                                   CPT-SOLDE ' EUR'
-                           ADD 1 TO WS-NB-OPERATIONS
-                           PERFORM ENREGISTRER-MOUVEMENT
+                           IF WS-FILE-STATUS = '00'
+                               DISPLAY 'Retrait effectue. Solde: '
+                                       CPT-SOLDE ' EUR'
+                               ADD 1 TO WS-NB-OPERATIONS
+                               MOVE 'R' TO WS-TYPE-MOUVEMENT
+                               PERFORM ENREGISTRER-MOUVEMENT
+                           ELSE
+                               DISPLAY 'ERREUR ecriture compte: '
+                                       WS-FILE-STATUS
+                           END-IF
                        ELSE
                            DISPLAY 'ERREUR: Montant ou solde invalide!'
                        END-IF
@@ -262,7 +328,10 @@
            DISPLAY ' '
            DISPLAY '===== CONSULTATION ====='
            DISPLAY 'Numero de compte: ' WITH NO ADVANCING
-           ACCEPT WS-NUMERO-COMPTE
+           PERFORM SAISIR-NUMERO
+           IF WS-SAISIE-OK NOT = 'Y'
+               EXIT PARAGRAPH
+           END-IF
            
            MOVE WS-NUMERO-COMPTE TO CPT-NUMERO
            READ COMPTES-FILE
@@ -284,7 +353,10 @@
            DISPLAY ' '
            DISPLAY '===== CALCUL DES INTERETS ====='
            DISPLAY 'Numero de compte: ' WITH NO ADVANCING
-           ACCEPT WS-NUMERO-COMPTE
+           PERFORM SAISIR-NUMERO
+           IF WS-SAISIE-OK NOT = 'Y'
+               EXIT PARAGRAPH
+           END-IF
            
            MOVE WS-NUMERO-COMPTE TO CPT-NUMERO
            READ COMPTES-FILE
@@ -292,10 +364,18 @@
                    DISPLAY 'ERREUR: Compte inexistant!'
                NOT INVALID KEY
                    IF COMPTE-ACTIF
-                       COMPUTE WS-INTERETS =
+                       COMPUTE WS-INTERETS ROUNDED =
                            CPT-SOLDE * CPT-TAUX-INTERET / 100
+                           ON SIZE ERROR
+                               DISPLAY 'ERREUR: Interets trop eleves!'
+                               EXIT PARAGRAPH
+                       END-COMPUTE
                        COMPUTE WS-NOUVEAU-SOLDE =
                            CPT-SOLDE + WS-INTERETS
+                           ON SIZE ERROR
+                               DISPLAY 'ERREUR: Solde maximum!'
+                               EXIT PARAGRAPH
+                       END-COMPUTE
                        
                        DISPLAY 'Solde actuel: ' CPT-SOLDE ' EUR'
                        DISPLAY 'Interets calcules: ' WS-INTERETS ' EUR'
@@ -303,12 +383,26 @@
                        
                        DISPLAY 'Appliquer interets? (O/N): '
                                WITH NO ADVANCING
-                       ACCEPT WS-CHOIX-MENU
-                       IF WS-CHOIX-MENU = 1 OR WS-CHOIX-MENU = 79
+                       MOVE SPACE TO WS-CONFIRMATION
+                       ACCEPT WS-CONFIRMATION
+                       IF WS-CONFIRMATION = 'O' OR 'o'
                            MOVE WS-NOUVEAU-SOLDE TO CPT-SOLDE
                            MOVE WS-DATE-FORMAT TO CPT-DATE-MAJ
                            REWRITE COMPTE-RECORD
-                           DISPLAY 'Interets appliques avec succes!'
+                           IF WS-FILE-STATUS = '00'
+                               DISPLAY 'Interets appliques!'
+                               MOVE WS-INTERETS TO WS-MONTANT
+                               MOVE 'I' TO WS-TYPE-MOUVEMENT
+                               ADD 1 TO WS-NB-OPERATIONS
+                               PERFORM ENREGISTRER-MOUVEMENT
+                           ELSE
+                               DISPLAY 'ERREUR ecriture compte: '
+                                       WS-FILE-STATUS
+                           END-IF
+                       ELSE
+                           IF WS-CONFIRMATION NOT = 'N' AND 'n'
+                               DISPLAY 'Confirmation invalide.'
+                           END-IF
                        END-IF
                    ELSE
                        DISPLAY 'ERREUR: Compte ferme!'
@@ -316,60 +410,158 @@
            END-READ.
        
        ENREGISTRER-MOUVEMENT.
-           OPEN EXTEND MOUVEMENTS-FILE
            MOVE WS-NUMERO-COMPTE TO MVT-NUMERO-COMPTE
            MOVE WS-MONTANT TO MVT-MONTANT
            MOVE WS-DATE-FORMAT TO MVT-DATE
-           
-           IF WS-CHOIX-MENU = 2
-               MOVE 'D' TO MVT-TYPE
-               MOVE 'DEPOT EN ESPECES' TO MVT-LIBELLE
-           ELSE
-               MOVE 'R' TO MVT-TYPE
-               MOVE 'RETRAIT EN ESPECES' TO MVT-LIBELLE
-           END-IF
-           
+
+           MOVE WS-TYPE-MOUVEMENT TO MVT-TYPE
+           EVALUATE WS-TYPE-MOUVEMENT
+               WHEN 'D'
+                   MOVE 'DEPOT' TO MVT-LIBELLE
+               WHEN 'R'
+                   MOVE 'RETRAIT' TO MVT-LIBELLE
+               WHEN 'I'
+                   MOVE 'INTERETS' TO MVT-LIBELLE
+           END-EVALUATE
+
            WRITE MOUVEMENT-RECORD
-           CLOSE MOUVEMENTS-FILE.
+           IF WS-MVT-STATUS NOT = '00'
+               DISPLAY 'ERREUR ecriture mouvement: '
+                       WS-MVT-STATUS
+           END-IF.
        
        GENERER-RAPPORT.
            DISPLAY ' '
            DISPLAY '===== GENERATION DU RAPPORT ====='
+           MOVE 'N' TO WS-RPT-ERROR
            OPEN OUTPUT RAPPORT-FILE
-           
+           IF WS-RPT-STATUS NOT = '00'
+               DISPLAY 'ERREUR ouverture rapport: '
+                       WS-RPT-STATUS
+               EXIT PARAGRAPH
+           END-IF
+
            MOVE 'RAPPORT DES COMPTES D''EPARGNE' TO RAPPORT-RECORD
-           WRITE RAPPORT-RECORD
+           PERFORM ECRIRE-RAPPORT
            MOVE '==============================' TO RAPPORT-RECORD
-           WRITE RAPPORT-RECORD
-           
-           MOVE LOW-VALUES TO CPT-NUMERO
+           PERFORM ECRIRE-RAPPORT
+
+           MOVE ZERO TO CPT-NUMERO
            START COMPTES-FILE KEY >= CPT-NUMERO
-           
-           PERFORM UNTIL WS-FILE-STATUS = '10'
-               READ COMPTES-FILE NEXT
-                   AT END
-                       CONTINUE
-                   NOT AT END
-                       STRING 'Compte: ' DELIMITED BY SIZE
-                              CPT-NUMERO DELIMITED BY SIZE
-                              ' - ' DELIMITED BY SIZE
-                              CPT-PRENOM DELIMITED BY SIZE
-                              ' ' DELIMITED BY SIZE
-                              CPT-NOM DELIMITED BY SIZE
-                              ' - Solde: ' DELIMITED BY SIZE
-                              CPT-SOLDE DELIMITED BY SIZE
-                              ' EUR' DELIMITED BY SIZE
-                              INTO RAPPORT-RECORD
-                       END-STRING
-                       WRITE RAPPORT-RECORD
-               END-READ
-           END-PERFORM
-           
+           EVALUATE WS-FILE-STATUS
+               WHEN '23'
+                   MOVE 'Aucun compte.' TO RAPPORT-RECORD
+                   PERFORM ECRIRE-RAPPORT
+               WHEN '00'
+                   PERFORM UNTIL WS-FILE-STATUS NOT = '00'
+                       OR WS-RPT-ERROR = 'Y'
+                       READ COMPTES-FILE NEXT
+                       IF WS-FILE-STATUS = '00'
+                           MOVE CPT-SOLDE TO WS-SOLDE-RAPPORT
+                           MOVE SPACES TO RAPPORT-RECORD
+                           STRING 'Compte: ' DELIMITED BY SIZE
+                                  CPT-NUMERO DELIMITED BY SIZE
+                                  ' - ' DELIMITED BY SIZE
+                                  FUNCTION TRIM(CPT-PRENOM)
+                                      DELIMITED BY SIZE
+                                  ' ' DELIMITED BY SIZE
+                                  FUNCTION TRIM(CPT-NOM)
+                                      DELIMITED BY SIZE
+                                  ' - Solde: ' DELIMITED BY SIZE
+                                  FUNCTION TRIM(WS-SOLDE-RAPPORT)
+                                      DELIMITED BY SIZE
+                                  ' EUR' DELIMITED BY SIZE
+                                  INTO RAPPORT-RECORD
+                           END-STRING
+                           PERFORM ECRIRE-RAPPORT
+                       END-IF
+                   END-PERFORM
+                   IF WS-FILE-STATUS NOT = '10'
+                       AND WS-RPT-ERROR NOT = 'Y'
+                       DISPLAY 'ERREUR lecture comptes: '
+                               WS-FILE-STATUS
+                       MOVE 'Y' TO WS-RPT-ERROR
+                   END-IF
+               WHEN OTHER
+                   DISPLAY 'ERREUR parcours comptes: '
+                           WS-FILE-STATUS
+                   MOVE 'Y' TO WS-RPT-ERROR
+           END-EVALUATE
+
            CLOSE RAPPORT-FILE
-           DISPLAY 'Rapport genere avec succes!'.
+           IF WS-RPT-STATUS = '00' AND WS-RPT-ERROR = 'N'
+               DISPLAY 'Rapport genere avec succes!'
+           ELSE
+               DISPLAY 'ERREUR generation rapport: '
+                       WS-RPT-STATUS
+           END-IF.
+
+       ECRIRE-RAPPORT.
+           IF WS-RPT-ERROR = 'N'
+               WRITE RAPPORT-RECORD
+               IF WS-RPT-STATUS NOT = '00'
+                   MOVE 'Y' TO WS-RPT-ERROR
+               END-IF
+           END-IF.
        
+       SAISIR-NUMERO.
+           MOVE 'N' TO WS-SAISIE-OK
+           MOVE SPACES TO WS-SAISIE
+           ACCEPT WS-SAISIE
+           IF FUNCTION LENGTH(FUNCTION TRIM(WS-SAISIE)) = 10
+               AND WS-SAISIE(1:10) IS NUMERIC
+               MOVE WS-SAISIE(1:10) TO WS-NUMERO-COMPTE
+               MOVE 'Y' TO WS-SAISIE-OK
+           ELSE
+               DISPLAY 'ERREUR: Numero de compte invalide!'
+           END-IF.
+
+       SAISIR-MONTANT.
+           MOVE 'N' TO WS-SAISIE-OK
+           MOVE SPACES TO WS-SAISIE
+           ACCEPT WS-SAISIE
+           IF FUNCTION TEST-NUMVAL(WS-SAISIE) NOT = 0
+               DISPLAY 'ERREUR: Montant invalide!'
+               EXIT PARAGRAPH
+           END-IF
+           IF FUNCTION NUMVAL(WS-SAISIE) <= 0
+               OR FUNCTION NUMVAL(WS-SAISIE) > 999999999.99
+               DISPLAY 'ERREUR: Montant invalide!'
+               EXIT PARAGRAPH
+           END-IF
+           COMPUTE WS-MONTANT = FUNCTION NUMVAL(WS-SAISIE)
+           IF WS-MONTANT NOT = FUNCTION NUMVAL(WS-SAISIE)
+               DISPLAY 'ERREUR: Deux decimales maximum!'
+           ELSE
+               MOVE 'Y' TO WS-SAISIE-OK
+           END-IF.
+
+       SAISIR-TAUX.
+           MOVE 'N' TO WS-SAISIE-OK
+           MOVE SPACES TO WS-SAISIE
+           ACCEPT WS-SAISIE
+           IF FUNCTION TEST-NUMVAL(WS-SAISIE) NOT = 0
+               DISPLAY 'ERREUR: Taux invalide!'
+               EXIT PARAGRAPH
+           END-IF
+           IF FUNCTION NUMVAL(WS-SAISIE) < 0
+               OR FUNCTION NUMVAL(WS-SAISIE) > 9.99
+               DISPLAY 'ERREUR: Taux attendu de 0 a 9.99%!'
+               EXIT PARAGRAPH
+           END-IF
+           COMPUTE WS-TAUX = FUNCTION NUMVAL(WS-SAISIE)
+           IF WS-TAUX NOT = FUNCTION NUMVAL(WS-SAISIE)
+               DISPLAY 'ERREUR: Deux decimales maximum!'
+           ELSE
+               MOVE 'Y' TO WS-SAISIE-OK
+           END-IF.
+
        TERMINAISON.
-           CLOSE COMPTES-FILE
+           IF WS-MVT-READY = 'Y'
+               CLOSE MOUVEMENTS-FILE
+           END-IF
+           IF WS-CPT-READY = 'Y'
+               CLOSE COMPTES-FILE
+           END-IF
            DISPLAY 'Nombre de comptes traites: ' WS-NB-COMPTES
            DISPLAY 'Nombre d''operations: ' WS-NB-OPERATIONS.
-           
